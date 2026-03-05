@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Observer</title>
+    <link rel="stylesheet" href="/static/style.css">
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+</head>
+<body>
+    <!-- Top Bar -->
+    <header id="topbar">
+        <div class="topbar-left">
+            <span class="logo">AI Observer</span>
+            <span class="version">v1.0</span>
+        </div>
+        <div class="topbar-center">
+            <span id="event-counter" class="stat-pill">0 events</span>
+            <span id="token-counter" class="stat-pill">0 tokens</span>
+            <span id="cost-counter" class="stat-pill">$0.00</span>
+        </div>
+        <div class="topbar-right">
+            <button id="btn-clear" onclick="clearData()" title="Clear all data">Clear</button>
+            <span id="connection-status" class="status-dot connected" title="Polling active"></span>
+        </div>
+    </header>
+
+    <!-- Main Layout -->
+    <div id="main">
+        <!-- Graph Panel -->
+        <div id="graph-panel">
+            <svg id="graph-svg"></svg>
+            <!-- Legend -->
+            <div id="legend"></div>
+        </div>
+
+        <!-- Right Sidebar -->
+        <div id="sidebar">
+            <!-- Timeline Section -->
+            <div class="sidebar-section" id="timeline-section">
+                <div class="section-header">
+                    <span>Timeline</span>
+                    <div class="timeline-controls">
+                        <button id="timeline-play" onclick="timelineToggle()" title="Play/Pause">&#9654;</button>
+                        <select id="timeline-speed" onchange="setTimelineSpeed(this.value)">
+                            <option value="2000">0.5x</option>
+                            <option value="1000" selected>1x</option>
+                            <option value="500">2x</option>
+                            <option value="250">4x</option>
+                        </select>
+                    </div>
+                </div>
+                <div id="timeline-progress-bar"><div id="timeline-progress"></div></div>
+                <div id="timeline-list"></div>
+            </div>
+
+            <!-- Stats Section -->
+            <div class="sidebar-section" id="stats-section">
+                <div class="section-header"><span>Statistics</span></div>
+                <div id="stats-content"></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Tooltip -->
+    <div id="tooltip" class="tooltip hidden"></div>
+
+    <script src="/static/app.js"></script>
+</body>
+</html>
