@@ -1,9 +1,10 @@
 /* ═══════════════════════════════════════════════════════════════════
-   AI Observer — D3 Force Graph + Timeline + Particles
-   Per-project / per-session filtering + rich prompt summaries
+   AI Observer — D3 Force Graph + Event Timeline + Replay
+   Per-project / per-session filtering + individual event tracking
    ═══════════════════════════════════════════════════════════════════ */
 
-const POLL_INTERVAL = 3000;
+const POLL_INTERVAL = 2000;
+const MAX_EVENTS = 5000;
 
 /* ── Entity Styles ────────────────────────────────────────────────── */
 
@@ -60,11 +61,24 @@ function filterParams() {
     return qs ? '?' + qs : '';
 }
 
+function eventFilterParams(extra = {}) {
+    const params = new URLSearchParams();
+    if (_filterProject) params.set('project', _filterProject);
+    if (_filterSession) params.set('session', _filterSession);
+    for (const [k, v] of Object.entries(extra)) {
+        if (v !== undefined && v !== null && v !== 0 && v !== '') params.set(k, v);
+    }
+    const qs = params.toString();
+    return qs ? '?' + qs : '';
+}
+
 function onProjectChange() {
     _filterProject = document.getElementById('filter-project').value;
-    _filterSession = '';  // reset session when project changes
+    _filterSession = '';
     document.getElementById('filter-session').value = '';
-    _fingerprint = '';  // force graph re-render
+    _fingerprint = '';
+    _lastEventSeq = 0;
+    _events = [];
     loadSessions();
     loadAll();
 }
@@ -72,20 +86,26 @@ function onProjectChange() {
 function onSessionChange() {
     _filterSession = document.getElementById('filter-session').value;
     _fingerprint = '';
+    _lastEventSeq = 0;
+    _events = [];
     loadAll();
 }
 
-/* ── Graph State ──────────────────────────────────────────────────── */
+/* ── State ────────────────────────────────────────────────────────── */
 
 let _simulation = null;
 let _graphData = null;
 let _fingerprint = '';
-let _timelineData = [];
-let _timelinePlaying = false;
-let _timelineInterval = null;
-let _timelineIndex = 0;
-let _timelineSpeed = 1000;
+let _events = [];
+let _lastEventSeq = 0;
 let _particleInterval = null;
+
+// Replay state
+let _replayActive = false;
+let _replayInterval = null;
+let _replayIndex = 0;
+let _replaySpeed = 1000;  // ms per step
+let _replayMode = 'step'; // 'step' = fixed interval, 'temporal' = proportional to real time
 
 /* ── Graph Rendering ──────────────────────────────────────────────── */
 
@@ -121,7 +141,7 @@ function renderGraph(data) {
             .attr('text-anchor', 'middle')
             .attr('fill', 'rgba(255,255,255,0.2)')
             .attr('font-size', '14px')
-            .text('Waiting for events... Start a Claude Code session or send test events.');
+            .text('Waiting for events... Start a Claude Code session.');
         return;
     }
 
@@ -215,6 +235,7 @@ function renderGraph(data) {
     const maxCount = Math.max(1, ...edges.map(e => e.count));
 
     _particleInterval = setInterval(() => {
+        if (_replayActive) return; // don't auto-animate during replay
         edges.forEach(edge => {
             if (Math.random() > 0.12 * ((edge.count || 1) / maxCount + 0.1)) return;
             const src = typeof edge.source === 'object' ? edge.source : nodes.find(n => n.id === edge.source);
@@ -280,68 +301,90 @@ function renderLegend() {
     ).join('');
 }
 
-/* ── Timeline Rendering (rich) ────────────────────────────────────── */
+/* ── Timeline Rendering (individual events) ──────────────────────── */
 
-function renderTimeline(data) {
+function renderTimeline(events) {
     const container = document.getElementById('timeline-list');
-    if (!data || data.length === 0) {
+    if (!events || events.length === 0) {
         container.innerHTML = '<div class="empty-state"><div class="empty-state-icon">\u23F3</div>No events yet.<br>Start a Claude Code session.</div>';
+        updateReplayControls();
         return;
     }
 
-    container.innerHTML = data.map((flow, idx) => {
-        const style = getInteractionStyle(flow.conversation_type);
-        const time = flow.start_time ? new Date(flow.start_time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }) : '';
-        const src = getDisplayName(flow.source);
-        const tgt = getDisplayName(flow.target);
+    container.innerHTML = events.map((evt, idx) => {
+        const style = getInteractionStyle(evt.conversation_type);
+        const time = evt.timestamp
+            ? new Date(evt.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+            : '';
 
-        // Classify entry type for styling
-        const isPrompt = flow.conversation_type === 'user_request' && flow.summary.startsWith('Prompt:');
-        const isSessionStart = flow.summary.includes('session started') || flow.summary.includes('Session started');
-        const isError = flow.conversation_type === 'error';
+        const src = getDisplayName(evt.source);
+        const tgt = getDisplayName(evt.target);
+
+        // Classify entry
+        const isPrompt = evt.conversation_type === 'user_request' && evt.summary.startsWith('Prompt:');
+        const isSessionStart = evt.summary.includes('session started') || evt.summary.includes('Session started');
+        const isError = evt.conversation_type === 'error';
 
         let cssClass = 'timeline-entry';
         if (isPrompt) cssClass += ' is-prompt';
         else if (isSessionStart) cssClass += ' is-session-start';
         else if (isError) cssClass += ' is-error';
 
-        // Show project badge if not filtered to a single project
-        const projectBadge = (!_filterProject && flow.project)
-            ? `<span class="tl-project-badge">${flow.project}</span>`
+        // Project badge (when showing all projects)
+        const projectBadge = (!_filterProject && evt.project)
+            ? `<span class="tl-project-badge">${evt.project}</span>`
             : '';
 
-        // For prompts, show the full prompt text (not truncated)
+        // Summary text
         const summaryText = isPrompt
-            ? flow.summary.slice(8)  // strip "Prompt: " prefix
-            : (flow.summary || flow.conversation_type);
+            ? evt.summary.slice(8)
+            : (evt.summary || evt.conversation_type);
 
-        // Detail row (expandable on click)
+        // Sequence number for reference
+        const seqBadge = `<span class="tl-seq">#${evt.seq}</span>`;
+
+        // Time delta from previous event
+        let deltaText = '';
+        if (idx > 0 && events[idx - 1].timestamp_unix && evt.timestamp_unix) {
+            const deltaMs = (evt.timestamp_unix - events[idx - 1].timestamp_unix) * 1000;
+            if (deltaMs > 1000) {
+                deltaText = `<span class="tl-delta">+${(deltaMs / 1000).toFixed(1)}s</span>`;
+            }
+        }
+
+        // Detail row (expandable)
         const detail = `<div class="tl-detail">
-            <div class="tl-detail-row"><span class="tl-detail-label">Flow ID</span><span class="tl-detail-value">${flow.flow_id}</span></div>
-            <div class="tl-detail-row"><span class="tl-detail-label">Type</span><span class="tl-detail-value">${flow.conversation_type}</span></div>
-            ${flow.project ? `<div class="tl-detail-row"><span class="tl-detail-label">Project</span><span class="tl-detail-value">${flow.project}</span></div>` : ''}
-            ${flow.session_id ? `<div class="tl-detail-row"><span class="tl-detail-label">Session</span><span class="tl-detail-value">${flow.session_id.slice(0, 12)}...</span></div>` : ''}
-            <div class="tl-detail-row"><span class="tl-detail-label">Messages</span><span class="tl-detail-value">${flow.message_count}</span></div>
-            ${flow.tokens_used ? `<div class="tl-detail-row"><span class="tl-detail-label">Tokens</span><span class="tl-detail-value">${flow.tokens_used.toLocaleString()}</span></div>` : ''}
-            ${flow.cost_usd > 0 ? `<div class="tl-detail-row"><span class="tl-detail-label">Cost</span><span class="tl-detail-value">$${flow.cost_usd.toFixed(6)}</span></div>` : ''}
-            ${flow.duration_ms > 0 ? `<div class="tl-detail-row"><span class="tl-detail-label">Duration</span><span class="tl-detail-value">${(flow.duration_ms / 1000).toFixed(1)}s</span></div>` : ''}
+            <div class="tl-detail-row"><span class="tl-detail-label">Event ID</span><span class="tl-detail-value">${evt.event_id}</span></div>
+            <div class="tl-detail-row"><span class="tl-detail-label">Type</span><span class="tl-detail-value">${evt.conversation_type}</span></div>
+            <div class="tl-detail-row"><span class="tl-detail-label">Source</span><span class="tl-detail-value">${evt.source}</span></div>
+            <div class="tl-detail-row"><span class="tl-detail-label">Target</span><span class="tl-detail-value">${evt.target}</span></div>
+            ${evt.project ? `<div class="tl-detail-row"><span class="tl-detail-label">Project</span><span class="tl-detail-value">${evt.project}</span></div>` : ''}
+            ${evt.session_id ? `<div class="tl-detail-row"><span class="tl-detail-label">Session</span><span class="tl-detail-value">${evt.session_id.slice(0, 16)}...</span></div>` : ''}
+            ${evt.tokens > 0 ? `<div class="tl-detail-row"><span class="tl-detail-label">Tokens</span><span class="tl-detail-value">${evt.tokens.toLocaleString()}</span></div>` : ''}
+            ${evt.cost_usd > 0 ? `<div class="tl-detail-row"><span class="tl-detail-label">Cost</span><span class="tl-detail-value">$${evt.cost_usd.toFixed(6)}</span></div>` : ''}
         </div>`;
 
         return `<div class="${cssClass}" data-index="${idx}" id="tl-entry-${idx}" onclick="toggleTimelineDetail(${idx})">
             <div class="tl-icon">${style.icon}</div>
             <div class="tl-content">
-                <div class="tl-agents">${src} \u2192 ${tgt}${projectBadge}</div>
+                <div class="tl-agents">${seqBadge} ${src} \u2192 ${tgt}${projectBadge}</div>
                 <div class="tl-summary">${summaryText}</div>
-                <span class="tl-type-badge" style="background:${style.color}30;color:${style.color}">${flow.conversation_type}</span>
+                <span class="tl-type-badge" style="background:${style.color}30;color:${style.color}">${evt.conversation_type}</span>
                 ${detail}
             </div>
             <div class="tl-meta">
                 <div>${time}</div>
-                ${flow.tokens_used ? `<div>${flow.tokens_used} tok</div>` : ''}
-                ${flow.cost_usd > 0 ? `<div>$${flow.cost_usd.toFixed(4)}</div>` : ''}
+                ${deltaText}
             </div>
         </div>`;
     }).join('');
+
+    updateReplayControls();
+
+    // Auto-scroll to bottom if not in replay mode
+    if (!_replayActive) {
+        container.scrollTop = container.scrollHeight;
+    }
 }
 
 function toggleTimelineDetail(idx) {
@@ -349,59 +392,138 @@ function toggleTimelineDetail(idx) {
     if (entry) entry.classList.toggle('expanded');
 }
 
-/* ── Timeline Replay ──────────────────────────────────────────────── */
+/* ── Timeline Replay ─────────────────────────────────────────────── */
 
-function timelineToggle() {
-    if (_timelinePlaying) timelinePause();
-    else timelinePlay();
+function updateReplayControls() {
+    const total = _events.length;
+    const pos = _replayActive ? _replayIndex : total;
+    document.getElementById('replay-position').textContent = `${pos}/${total}`;
+    document.getElementById('timeline-progress').style.width =
+        total > 0 ? (pos / total * 100) + '%' : '0%';
 }
 
-function timelinePlay() {
-    if (_timelineData.length === 0) return;
-    _timelinePlaying = true;
-    document.getElementById('timeline-play').textContent = '\u23F8 Pause';
-    if (_timelineIndex >= _timelineData.length) _timelineIndex = 0;
-
-    _timelineInterval = setInterval(() => {
-        if (_timelineIndex >= _timelineData.length) { timelinePause(); return; }
-        const flow = _timelineData[_timelineIndex];
-        fireTimelineParticle(flow);
-
-        document.querySelectorAll('.timeline-entry').forEach(el => el.classList.remove('active'));
-        const entry = document.getElementById(`tl-entry-${_timelineIndex}`);
-        if (entry) {
-            entry.classList.add('active');
-            entry.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
-        }
-        _timelineIndex++;
-        document.getElementById('timeline-progress').style.width =
-            (_timelineIndex / _timelineData.length * 100) + '%';
-    }, _timelineSpeed);
+function replayToggle() {
+    if (_replayActive) replayPause();
+    else replayStart();
 }
 
-function timelinePause() {
-    _timelinePlaying = false;
-    document.getElementById('timeline-play').textContent = '\u25B6 Play';
-    if (_timelineInterval) { clearInterval(_timelineInterval); _timelineInterval = null; }
+function replayStart() {
+    if (_events.length === 0) return;
+    _replayActive = true;
+    document.getElementById('timeline-play').textContent = '\u23F8';
+    document.getElementById('timeline-play').title = 'Pause';
+    if (_replayIndex >= _events.length) _replayIndex = 0;
+
+    stepReplay();
 }
 
-function setTimelineSpeed(ms) {
-    _timelineSpeed = parseInt(ms);
-    if (_timelinePlaying) { timelinePause(); timelinePlay(); }
+function stepReplay() {
+    if (!_replayActive) return;
+    if (_replayIndex >= _events.length) {
+        replayPause();
+        return;
+    }
+
+    const evt = _events[_replayIndex];
+    highlightTimelineEntry(_replayIndex);
+    fireParticle(evt);
+    _replayIndex++;
+    updateReplayControls();
+
+    // Schedule next step
+    let delay = _replaySpeed;
+    if (_replayMode === 'temporal' && _replayIndex < _events.length) {
+        const next = _events[_replayIndex];
+        const gap = (next.timestamp_unix - evt.timestamp_unix) * 1000;
+        // Scale the real gap — cap between 100ms and 3000ms
+        delay = Math.max(100, Math.min(3000, gap * (1000 / _replaySpeed)));
+    }
+
+    _replayInterval = setTimeout(stepReplay, delay);
 }
 
-function fireTimelineParticle(flow) {
+function replayPause() {
+    _replayActive = false;
+    document.getElementById('timeline-play').textContent = '\u25B6';
+    document.getElementById('timeline-play').title = 'Play';
+    if (_replayInterval) { clearTimeout(_replayInterval); _replayInterval = null; }
+}
+
+function replayReset() {
+    replayPause();
+    _replayIndex = 0;
+    document.querySelectorAll('.timeline-entry').forEach(el => el.classList.remove('active'));
+    updateReplayControls();
+}
+
+function replayStepForward() {
+    if (_replayIndex >= _events.length) return;
+    const evt = _events[_replayIndex];
+    highlightTimelineEntry(_replayIndex);
+    fireParticle(evt);
+    _replayIndex++;
+    updateReplayControls();
+}
+
+function replayStepBack() {
+    if (_replayIndex <= 0) return;
+    _replayIndex--;
+    highlightTimelineEntry(_replayIndex);
+    updateReplayControls();
+}
+
+function setReplaySpeed(ms) {
+    _replaySpeed = parseInt(ms);
+    // If currently playing, restart with new speed
+    if (_replayActive) {
+        if (_replayInterval) clearTimeout(_replayInterval);
+        stepReplay();
+    }
+}
+
+function toggleReplayMode() {
+    _replayMode = _replayMode === 'step' ? 'temporal' : 'step';
+    const btn = document.getElementById('replay-mode');
+    btn.textContent = _replayMode === 'step' ? 'Fixed' : 'Temporal';
+    btn.title = _replayMode === 'step'
+        ? 'Fixed interval between events'
+        : 'Proportional to real time gaps';
+}
+
+function highlightTimelineEntry(idx) {
+    document.querySelectorAll('.timeline-entry').forEach(el => el.classList.remove('active'));
+    const entry = document.getElementById(`tl-entry-${idx}`);
+    if (entry) {
+        entry.classList.add('active');
+        entry.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    }
+}
+
+function onProgressBarClick(e) {
+    if (_events.length === 0) return;
+    const bar = document.getElementById('timeline-progress-bar');
+    const rect = bar.getBoundingClientRect();
+    const pct = (e.clientX - rect.left) / rect.width;
+    _replayIndex = Math.floor(pct * _events.length);
+    highlightTimelineEntry(_replayIndex);
+    updateReplayControls();
+}
+
+/* ── Particle Animation ───────────────────────────────────────────── */
+
+function fireParticle(evt) {
     if (!_simulation) return;
     const nodes = _simulation.nodes();
-    const src = nodes.find(n => n.id === flow.source);
-    const tgt = nodes.find(n => n.id === flow.target);
+    const src = nodes.find(n => n.id === evt.source);
+    const tgt = nodes.find(n => n.id === evt.target);
     if (!src || !tgt || !src.x || !tgt.x) return;
 
     const particleLayer = d3.select('#graph-svg').select('.particles');
     if (particleLayer.empty()) return;
 
-    const color = (ENTITY_STYLES[getEntityType(flow.source)] || ENTITY_STYLES.external_ai).glow;
+    const color = (ENTITY_STYLES[getEntityType(evt.source)] || ENTITY_STYLES.external_ai).glow;
 
+    // Main particle
     particleLayer.append('circle')
         .attr('r', 5).attr('fill', color).attr('fill-opacity', 0.9)
         .attr('filter', 'url(#particle-glow)')
@@ -411,6 +533,7 @@ function fireTimelineParticle(flow) {
         .attr('r', 2).attr('fill-opacity', 0)
         .remove();
 
+    // Glow trail
     particleLayer.append('circle')
         .attr('r', 8).attr('fill', color).attr('fill-opacity', 0.3)
         .attr('cx', src.x).attr('cy', src.y)
@@ -469,7 +592,7 @@ async function loadGraph() {
     try {
         const data = await fetchJSON('/api/graph' + filterParams());
         const fp = JSON.stringify(data.nodes.map(n => n.id).sort()) +
-                   JSON.stringify(data.edges.map(e => e.source + e.target).sort());
+                   JSON.stringify(data.edges.map(e => e.source + e.target + e.count).sort());
         if (fp !== _fingerprint) {
             _fingerprint = fp;
             _graphData = data;
@@ -480,14 +603,23 @@ async function loadGraph() {
     }
 }
 
-async function loadTimeline() {
+async function loadEvents() {
     try {
-        const resp = await fetchJSON('/api/timeline' + filterParams());
-        const timeline = resp.timeline || [];
-        _timelineData = timeline.sort((a, b) => new Date(a.start_time) - new Date(b.start_time));
-        if (!_timelinePlaying) renderTimeline(_timelineData);
+        const resp = await fetchJSON('/api/events' + eventFilterParams({ since_seq: _lastEventSeq }));
+        const newEvents = resp.events || [];
+        if (newEvents.length > 0) {
+            _events = _events.concat(newEvents);
+            // Cap to prevent memory issues
+            if (_events.length > MAX_EVENTS) {
+                _events = _events.slice(-MAX_EVENTS);
+            }
+            _lastEventSeq = Math.max(..._events.map(e => e.seq));
+            if (!_replayActive) {
+                renderTimeline(_events);
+            }
+        }
     } catch (e) {
-        console.warn('Timeline load failed:', e);
+        console.warn('Events load failed:', e);
     }
 }
 
@@ -536,26 +668,30 @@ async function loadSessions() {
 }
 
 async function loadAll() {
-    await Promise.all([loadGraph(), loadTimeline(), loadStats()]);
+    await Promise.all([loadGraph(), loadEvents(), loadStats()]);
 }
 
 async function clearData() {
     const params = _filterProject ? `?project=${encodeURIComponent(_filterProject)}` : '';
     await fetch('/api/clear' + params, { method: 'POST' });
     _fingerprint = '';
-    _timelineData = [];
-    _timelineIndex = 0;
-    timelinePause();
+    _events = [];
+    _lastEventSeq = 0;
+    _replayIndex = 0;
+    replayPause();
     await Promise.all([loadProjects(), loadSessions(), loadAll()]);
 }
 
 /* ── Init ─────────────────────────────────────────────────────────── */
 
 async function init() {
+    // Wire up progress bar click
+    document.getElementById('timeline-progress-bar').addEventListener('click', onProgressBarClick);
+
     await Promise.all([loadProjects(), loadSessions()]);
     await loadAll();
 }
 
 init();
 setInterval(loadAll, POLL_INTERVAL);
-setInterval(() => { loadProjects(); loadSessions(); }, 10000);  // refresh dropdowns every 10s
+setInterval(() => { loadProjects(); loadSessions(); }, 10000);

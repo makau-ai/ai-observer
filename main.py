@@ -294,9 +294,19 @@ async def get_graph(project: str = "", session: str = ""):
     }
 
 
+@app.get("/api/events")
+async def get_events(project: str = "", session: str = "", since_seq: int = 0, limit: int = 0):
+    """Individual events (never merged) for timeline display and replay."""
+    events = tracker.get_events(project=project, session_id=session, since_seq=since_seq, limit=limit)
+    return {
+        "events": [e.to_dict() for e in events],
+        "total": tracker.get_event_count(project=project, session_id=session),
+    }
+
+
 @app.get("/api/timeline")
 async def get_timeline(project: str = "", session: str = ""):
-    """Chronological flow list for timeline replay."""
+    """Chronological flow list for timeline replay (aggregated)."""
     timeline = tracker.get_timeline(project=project, session_id=session)
     return {"timeline": [f.to_dict() for f in timeline]}
 

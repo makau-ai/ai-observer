@@ -51,16 +51,22 @@
             <!-- Timeline Section -->
             <div class="sidebar-section" id="timeline-section">
                 <div class="section-header">
-                    <span>Timeline</span>
-                    <div class="timeline-controls">
-                        <button id="timeline-play" onclick="timelineToggle()" title="Play/Pause">&#9654;</button>
-                        <select id="timeline-speed" onchange="setTimelineSpeed(this.value)">
-                            <option value="2000">0.5x</option>
-                            <option value="1000" selected>1x</option>
-                            <option value="500">2x</option>
-                            <option value="250">4x</option>
-                        </select>
-                    </div>
+                    <span>Event Log</span>
+                    <span id="replay-position" class="replay-pos">0/0</span>
+                </div>
+                <div class="replay-bar">
+                    <button id="replay-reset" onclick="replayReset()" title="Reset">&#x23EE;</button>
+                    <button id="replay-back" onclick="replayStepBack()" title="Step back">&#x23EA;</button>
+                    <button id="timeline-play" onclick="replayToggle()" title="Play">&#9654;</button>
+                    <button id="replay-fwd" onclick="replayStepForward()" title="Step forward">&#x23E9;</button>
+                    <select id="timeline-speed" onchange="setReplaySpeed(this.value)">
+                        <option value="2000">0.5x</option>
+                        <option value="1000" selected>1x</option>
+                        <option value="500">2x</option>
+                        <option value="250">4x</option>
+                        <option value="100">10x</option>
+                    </select>
+                    <button id="replay-mode" onclick="toggleReplayMode()" title="Fixed interval between events">Fixed</button>
                 </div>
                 <div id="timeline-progress-bar"><div id="timeline-progress"></div></div>
                 <div id="timeline-list"></div>

@@ -174,33 +174,52 @@ body {
     flex-shrink: 0;
 }
 
-.timeline-controls { display: flex; gap: 6px; align-items: center; }
+/* ── Replay Bar ──────────────────────────────────────────────────── */
 
-#timeline-play {
-    font-size: 10px;
-    padding: 2px 8px;
+.replay-bar {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 4px 12px;
+    border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+    background: var(--bg-card);
+}
+
+.replay-bar button {
+    font-size: 11px;
+    padding: 2px 6px;
     border: 1px solid var(--border);
     border-radius: 4px;
     background: transparent;
     color: var(--text-secondary);
     cursor: pointer;
+    line-height: 1;
 }
-#timeline-play:hover { border-color: var(--accent-amber); color: var(--accent-amber); }
+.replay-bar button:hover { border-color: var(--accent-amber); color: var(--accent-amber); }
 
-#timeline-speed {
+.replay-bar select {
     font-size: 10px;
     padding: 2px 4px;
     border: 1px solid var(--border);
     border-radius: 4px;
-    background: var(--bg-card);
+    background: var(--bg-primary);
     color: var(--text-secondary);
 }
 
+.replay-pos {
+    font-size: 10px;
+    font-family: 'SF Mono', 'Fira Code', monospace;
+    color: var(--text-muted);
+}
+
 #timeline-progress-bar {
-    height: 2px;
+    height: 4px;
     background: var(--bg-card);
     flex-shrink: 0;
+    cursor: pointer;
 }
+#timeline-progress-bar:hover { background: rgba(255,255,255,0.1); }
 
 #timeline-progress {
     height: 100%;
@@ -315,6 +334,22 @@ body {
 }
 .tl-detail-label { color: var(--text-muted); }
 .tl-detail-value { font-family: 'SF Mono', 'Fira Code', monospace; }
+
+/* Sequence number badge */
+.tl-seq {
+    font-size: 8px;
+    font-family: 'SF Mono', 'Fira Code', monospace;
+    color: var(--text-muted);
+    margin-right: 2px;
+}
+
+/* Time delta between events */
+.tl-delta {
+    font-size: 8px;
+    font-family: 'SF Mono', 'Fira Code', monospace;
+    color: var(--accent-amber);
+    opacity: 0.7;
+}
 
 /* Project badge in timeline */
 .tl-project-badge {

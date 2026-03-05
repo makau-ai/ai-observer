@@ -11,14 +11,50 @@ import uuid
 import time
 import threading
 from collections import defaultdict
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
 
 @dataclass
+class Event:
+    """Single individual event (never merged)."""
+    event_id: str
+    seq: int                   # global sequence number
+    source: str
+    target: str
+    conversation_type: str
+    summary: str
+    timestamp: float
+    project: str = ""
+    session_id: str = ""
+    tokens: int = 0
+    cost_usd: float = 0.0
+    provider: str = ""
+    model: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "event_id": self.event_id,
+            "seq": self.seq,
+            "source": self.source,
+            "target": self.target,
+            "conversation_type": self.conversation_type,
+            "summary": self.summary,
+            "timestamp": datetime.fromtimestamp(self.timestamp, tz=timezone.utc).isoformat() if self.timestamp else "",
+            "timestamp_unix": self.timestamp,
+            "project": self.project,
+            "session_id": self.session_id,
+            "tokens": self.tokens,
+            "cost_usd": round(self.cost_usd, 6),
+            "provider": self.provider,
+            "model": self.model,
+        }
+
+
+@dataclass
 class FlowRecord:
-    """Single source->target interaction flow."""
+    """Aggregated source->target interaction flow."""
     flow_id: str
     source: str
     target: str
@@ -74,6 +110,8 @@ class FlowTracker:
     def __init__(self) -> None:
         self._flows: dict[str, FlowRecord] = {}
         self._active_flows: dict[tuple, str] = {}  # (src, tgt, type, project, session) -> flow_id
+        self._events: list[Event] = []              # every individual event, never merged
+        self._event_seq: int = 0                    # monotonic sequence counter
         self._lock = threading.Lock()
 
     def _filter(self, project: str = "", session_id: str = "") -> list[FlowRecord]:
@@ -103,6 +141,26 @@ class FlowTracker:
         now = time.time()
 
         with self._lock:
+            # Always store individual event (never merged)
+            self._event_seq += 1
+            event = Event(
+                event_id=f"EVT-{uuid.uuid4().hex[:8]}",
+                seq=self._event_seq,
+                source=source,
+                target=target,
+                conversation_type=conversation_type,
+                summary=summary,
+                timestamp=now,
+                project=project,
+                session_id=session_id,
+                tokens=tokens,
+                cost_usd=cost_usd,
+                provider=provider,
+                model=model,
+            )
+            self._events.append(event)
+
+            # Also maintain aggregated flows for graph
             if key in self._active_flows:
                 flow = self._flows[self._active_flows[key]]
                 flow.message_count += 1
@@ -137,6 +195,31 @@ class FlowTracker:
                 self._active_flows[key] = flow.flow_id
 
         return flow
+
+    def _filter_events(self, project: str = "", session_id: str = "", since_seq: int = 0) -> list[Event]:
+        """Return events matching filters, optionally only those after a sequence number."""
+        result = self._events
+        if since_seq > 0:
+            result = [e for e in result if e.seq > since_seq]
+        if project:
+            result = [e for e in result if e.project == project]
+        if session_id:
+            result = [e for e in result if e.session_id == session_id]
+        return result
+
+    def get_events(self, project: str = "", session_id: str = "", since_seq: int = 0, limit: int = 0) -> list[Event]:
+        """Return individual events (never merged), sorted by timestamp."""
+        with self._lock:
+            events = self._filter_events(project, session_id, since_seq)
+            events.sort(key=lambda e: e.timestamp)
+            if limit > 0:
+                events = events[:limit]
+            return events
+
+    def get_event_count(self, project: str = "", session_id: str = "") -> int:
+        """Return total number of individual events."""
+        with self._lock:
+            return len(self._filter_events(project, session_id))
 
     def get_interaction_matrix(self, project: str = "", session_id: str = "") -> dict[str, Any]:
         """Build NxN interaction matrix + node list."""
@@ -261,6 +344,9 @@ class FlowTracker:
                 for fid in to_remove:
                     del self._flows[fid]
                 self._active_flows = {k: v for k, v in self._active_flows.items() if v not in to_remove}
+                self._events = [e for e in self._events if e.project != project]
             else:
                 self._flows.clear()
                 self._active_flows.clear()
+                self._events.clear()
+                self._event_seq = 0
