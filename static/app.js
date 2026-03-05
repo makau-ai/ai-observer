@@ -1,5 +1,6 @@
 /* ═══════════════════════════════════════════════════════════════════
    AI Observer — D3 Force Graph + Timeline + Particles
+   Per-project / per-session filtering + rich prompt summaries
    ═══════════════════════════════════════════════════════════════════ */
 
 const POLL_INTERVAL = 3000;
@@ -36,7 +37,6 @@ function getInteractionStyle(type) {
 }
 
 function getDisplayName(nodeId) {
-    // Strip prefixes for cleaner labels
     if (nodeId.startsWith('EXT:')) {
         const parts = nodeId.split(':');
         return parts.length >= 3 ? parts.slice(2).join(':') : parts[1];
@@ -47,7 +47,35 @@ function getDisplayName(nodeId) {
     return nodeId;
 }
 
-/* ── State ────────────────────────────────────────────────────────── */
+/* ── Filter State ─────────────────────────────────────────────────── */
+
+let _filterProject = '';
+let _filterSession = '';
+
+function filterParams() {
+    const params = new URLSearchParams();
+    if (_filterProject) params.set('project', _filterProject);
+    if (_filterSession) params.set('session', _filterSession);
+    const qs = params.toString();
+    return qs ? '?' + qs : '';
+}
+
+function onProjectChange() {
+    _filterProject = document.getElementById('filter-project').value;
+    _filterSession = '';  // reset session when project changes
+    document.getElementById('filter-session').value = '';
+    _fingerprint = '';  // force graph re-render
+    loadSessions();
+    loadAll();
+}
+
+function onSessionChange() {
+    _filterSession = document.getElementById('filter-session').value;
+    _fingerprint = '';
+    loadAll();
+}
+
+/* ── Graph State ──────────────────────────────────────────────────── */
 
 let _simulation = null;
 let _graphData = null;
@@ -66,27 +94,20 @@ function renderGraph(data) {
     const width = svg.node().clientWidth;
     const height = svg.node().clientHeight;
 
-    // Clear previous
     svg.selectAll('*').remove();
 
-    // SVG filters
     const defs = svg.append('defs');
-
-    // Glow filter
     const glow = defs.append('filter').attr('id', 'glow').attr('x', '-50%').attr('y', '-50%').attr('width', '200%').attr('height', '200%');
     glow.append('feGaussianBlur').attr('stdDeviation', '4').attr('result', 'blur');
     glow.append('feMerge').selectAll('feMergeNode').data(['blur', 'SourceGraphic']).enter()
         .append('feMergeNode').attr('in', d => d);
 
-    // Particle glow
     const pglow = defs.append('filter').attr('id', 'particle-glow').attr('x', '-100%').attr('y', '-100%').attr('width', '300%').attr('height', '300%');
     pglow.append('feGaussianBlur').attr('stdDeviation', '3').attr('result', 'blur');
     pglow.append('feMerge').selectAll('feMergeNode').data(['blur', 'SourceGraphic']).enter()
         .append('feMergeNode').attr('in', d => d);
 
     const g = svg.append('g');
-
-    // Zoom
     svg.call(d3.zoom().scaleExtent([0.2, 5]).on('zoom', (event) => {
         g.attr('transform', event.transform);
     }));
@@ -104,7 +125,6 @@ function renderGraph(data) {
         return;
     }
 
-    // Edge lines
     const edgeLines = g.append('g').attr('class', 'edges')
         .selectAll('line').data(edges).enter().append('line')
         .attr('stroke', d => {
@@ -114,10 +134,8 @@ function renderGraph(data) {
         .attr('stroke-opacity', d => Math.min(0.15 + d.count * 0.05, 0.6))
         .attr('stroke-width', d => Math.min(1 + d.count * 0.3, 4));
 
-    // Particle layer
     const particleLayer = g.append('g').attr('class', 'particles');
 
-    // Node groups
     const nodeGs = g.append('g').attr('class', 'nodes')
         .selectAll('g').data(nodes, d => d.id).enter().append('g')
         .attr('cursor', 'pointer')
@@ -127,38 +145,32 @@ function renderGraph(data) {
             .on('end', (event, d) => { if (!event.active) _simulation.alphaTarget(0); d.fx = null; d.fy = null; })
         );
 
-    // Render each node
     nodeGs.each(function (d) {
         const node = d3.select(this);
         const es = ENTITY_STYLES[d.type] || ENTITY_STYLES.external_ai;
         const r = 12 + Math.min(8, (d.messages_sent + d.messages_received) * 0.5);
 
-        // Outer glow
         node.append('circle').attr('r', r + 6)
             .attr('fill', 'none').attr('stroke', es.glow).attr('stroke-opacity', 0.12)
             .attr('stroke-width', 2).attr('filter', 'url(#glow)');
 
-        // Shape
         const shapeG = node.append('g');
         if (es.shape === 'octagon') drawOctagon(shapeG, r, es.fill, es.glow);
         else if (es.shape === 'diamond') drawDiamond(shapeG, r, es.fill, es.glow);
         else if (es.shape === 'rect') drawRoundRect(shapeG, r, es.fill, es.glow);
         else if (es.shape === 'shield') drawShield(shapeG, r, es.fill, es.glow);
 
-        // Icon
         node.append('text')
             .attr('text-anchor', 'middle').attr('dy', '0.35em')
             .attr('font-size', r * 0.9 + 'px')
             .text(es.icon);
 
-        // Label
         node.append('text')
             .attr('text-anchor', 'middle').attr('dy', r + 14)
             .attr('font-size', '9px')
             .attr('fill', es.glow).attr('font-weight', 500)
             .text(getDisplayName(d.id));
 
-        // Type badge
         node.append('text')
             .attr('text-anchor', 'middle').attr('dy', r + 24)
             .attr('font-size', '7px')
@@ -166,7 +178,6 @@ function renderGraph(data) {
             .text(es.label.toUpperCase());
     });
 
-    // Hover tooltip
     nodeGs.on('mouseover', (event, d) => {
         const es = ENTITY_STYLES[d.type] || ENTITY_STYLES.external_ai;
         const tip = document.getElementById('tooltip');
@@ -186,7 +197,6 @@ function renderGraph(data) {
         document.getElementById('tooltip').classList.add('hidden');
     });
 
-    // Force simulation
     _simulation = d3.forceSimulation(nodes)
         .force('link', d3.forceLink(edges).id(d => d.id).distance(120).strength(0.3))
         .force('charge', d3.forceManyBody().strength(-300))
@@ -201,21 +211,17 @@ function renderGraph(data) {
             nodeGs.attr('transform', d => `translate(${d.x},${d.y})`);
         });
 
-    // Ambient particles
     if (_particleInterval) clearInterval(_particleInterval);
     const maxCount = Math.max(1, ...edges.map(e => e.count));
 
     _particleInterval = setInterval(() => {
         edges.forEach(edge => {
             if (Math.random() > 0.12 * ((edge.count || 1) / maxCount + 0.1)) return;
-
             const src = typeof edge.source === 'object' ? edge.source : nodes.find(n => n.id === edge.source);
             const tgt = typeof edge.target === 'object' ? edge.target : nodes.find(n => n.id === edge.target);
             if (!src || !tgt || !src.x || !tgt.x) return;
-
             const srcType = getEntityType(typeof edge.source === 'object' ? edge.source.id : edge.source);
             const color = (ENTITY_STYLES[srcType] || ENTITY_STYLES.external_ai).glow;
-
             particleLayer.append('circle')
                 .attr('r', 2.5).attr('fill', color).attr('filter', 'url(#particle-glow)')
                 .attr('cx', src.x).attr('cy', src.y)
@@ -226,7 +232,6 @@ function renderGraph(data) {
         });
     }, 250);
 
-    // Render legend
     renderLegend();
 }
 
@@ -275,7 +280,7 @@ function renderLegend() {
     ).join('');
 }
 
-/* ── Timeline ─────────────────────────────────────────────────────── */
+/* ── Timeline Rendering (rich) ────────────────────────────────────── */
 
 function renderTimeline(data) {
     const container = document.getElementById('timeline-list');
@@ -290,12 +295,45 @@ function renderTimeline(data) {
         const src = getDisplayName(flow.source);
         const tgt = getDisplayName(flow.target);
 
-        return `<div class="timeline-entry" data-index="${idx}" id="tl-entry-${idx}">
+        // Classify entry type for styling
+        const isPrompt = flow.conversation_type === 'user_request' && flow.summary.startsWith('Prompt:');
+        const isSessionStart = flow.summary.includes('session started') || flow.summary.includes('Session started');
+        const isError = flow.conversation_type === 'error';
+
+        let cssClass = 'timeline-entry';
+        if (isPrompt) cssClass += ' is-prompt';
+        else if (isSessionStart) cssClass += ' is-session-start';
+        else if (isError) cssClass += ' is-error';
+
+        // Show project badge if not filtered to a single project
+        const projectBadge = (!_filterProject && flow.project)
+            ? `<span class="tl-project-badge">${flow.project}</span>`
+            : '';
+
+        // For prompts, show the full prompt text (not truncated)
+        const summaryText = isPrompt
+            ? flow.summary.slice(8)  // strip "Prompt: " prefix
+            : (flow.summary || flow.conversation_type);
+
+        // Detail row (expandable on click)
+        const detail = `<div class="tl-detail">
+            <div class="tl-detail-row"><span class="tl-detail-label">Flow ID</span><span class="tl-detail-value">${flow.flow_id}</span></div>
+            <div class="tl-detail-row"><span class="tl-detail-label">Type</span><span class="tl-detail-value">${flow.conversation_type}</span></div>
+            ${flow.project ? `<div class="tl-detail-row"><span class="tl-detail-label">Project</span><span class="tl-detail-value">${flow.project}</span></div>` : ''}
+            ${flow.session_id ? `<div class="tl-detail-row"><span class="tl-detail-label">Session</span><span class="tl-detail-value">${flow.session_id.slice(0, 12)}...</span></div>` : ''}
+            <div class="tl-detail-row"><span class="tl-detail-label">Messages</span><span class="tl-detail-value">${flow.message_count}</span></div>
+            ${flow.tokens_used ? `<div class="tl-detail-row"><span class="tl-detail-label">Tokens</span><span class="tl-detail-value">${flow.tokens_used.toLocaleString()}</span></div>` : ''}
+            ${flow.cost_usd > 0 ? `<div class="tl-detail-row"><span class="tl-detail-label">Cost</span><span class="tl-detail-value">$${flow.cost_usd.toFixed(6)}</span></div>` : ''}
+            ${flow.duration_ms > 0 ? `<div class="tl-detail-row"><span class="tl-detail-label">Duration</span><span class="tl-detail-value">${(flow.duration_ms / 1000).toFixed(1)}s</span></div>` : ''}
+        </div>`;
+
+        return `<div class="${cssClass}" data-index="${idx}" id="tl-entry-${idx}" onclick="toggleTimelineDetail(${idx})">
             <div class="tl-icon">${style.icon}</div>
             <div class="tl-content">
-                <div class="tl-agents">${src} \u2192 ${tgt}</div>
-                <div class="tl-summary">${flow.summary || flow.conversation_type}</div>
+                <div class="tl-agents">${src} \u2192 ${tgt}${projectBadge}</div>
+                <div class="tl-summary">${summaryText}</div>
                 <span class="tl-type-badge" style="background:${style.color}30;color:${style.color}">${flow.conversation_type}</span>
+                ${detail}
             </div>
             <div class="tl-meta">
                 <div>${time}</div>
@@ -306,46 +344,38 @@ function renderTimeline(data) {
     }).join('');
 }
 
+function toggleTimelineDetail(idx) {
+    const entry = document.getElementById(`tl-entry-${idx}`);
+    if (entry) entry.classList.toggle('expanded');
+}
+
 /* ── Timeline Replay ──────────────────────────────────────────────── */
 
 function timelineToggle() {
-    if (_timelinePlaying) {
-        timelinePause();
-    } else {
-        timelinePlay();
-    }
+    if (_timelinePlaying) timelinePause();
+    else timelinePlay();
 }
 
 function timelinePlay() {
     if (_timelineData.length === 0) return;
     _timelinePlaying = true;
     document.getElementById('timeline-play').textContent = '\u23F8 Pause';
-
     if (_timelineIndex >= _timelineData.length) _timelineIndex = 0;
 
     _timelineInterval = setInterval(() => {
-        if (_timelineIndex >= _timelineData.length) {
-            timelinePause();
-            return;
-        }
-
+        if (_timelineIndex >= _timelineData.length) { timelinePause(); return; }
         const flow = _timelineData[_timelineIndex];
         fireTimelineParticle(flow);
 
-        // Highlight current entry
         document.querySelectorAll('.timeline-entry').forEach(el => el.classList.remove('active'));
         const entry = document.getElementById(`tl-entry-${_timelineIndex}`);
         if (entry) {
             entry.classList.add('active');
             entry.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
         }
-
         _timelineIndex++;
-
-        // Progress bar
-        const pct = (_timelineIndex / _timelineData.length) * 100;
-        document.getElementById('timeline-progress').style.width = pct + '%';
-
+        document.getElementById('timeline-progress').style.width =
+            (_timelineIndex / _timelineData.length * 100) + '%';
     }, _timelineSpeed);
 }
 
@@ -357,30 +387,21 @@ function timelinePause() {
 
 function setTimelineSpeed(ms) {
     _timelineSpeed = parseInt(ms);
-    if (_timelinePlaying) {
-        timelinePause();
-        timelinePlay();
-    }
+    if (_timelinePlaying) { timelinePause(); timelinePlay(); }
 }
 
 function fireTimelineParticle(flow) {
     if (!_simulation) return;
-
     const nodes = _simulation.nodes();
-    const findNode = (id) => nodes.find(n => n.id === id);
-
-    const src = findNode(flow.source);
-    const tgt = findNode(flow.target);
+    const src = nodes.find(n => n.id === flow.source);
+    const tgt = nodes.find(n => n.id === flow.target);
     if (!src || !tgt || !src.x || !tgt.x) return;
 
-    const svg = d3.select('#graph-svg');
-    const particleLayer = svg.select('.particles');
+    const particleLayer = d3.select('#graph-svg').select('.particles');
     if (particleLayer.empty()) return;
 
-    const srcType = getEntityType(flow.source);
-    const color = (ENTITY_STYLES[srcType] || ENTITY_STYLES.external_ai).glow;
+    const color = (ENTITY_STYLES[getEntityType(flow.source)] || ENTITY_STYLES.external_ai).glow;
 
-    // Bright particle
     particleLayer.append('circle')
         .attr('r', 5).attr('fill', color).attr('fill-opacity', 0.9)
         .attr('filter', 'url(#particle-glow)')
@@ -390,7 +411,6 @@ function fireTimelineParticle(flow) {
         .attr('r', 2).attr('fill-opacity', 0)
         .remove();
 
-    // Glow halo
     particleLayer.append('circle')
         .attr('r', 8).attr('fill', color).attr('fill-opacity', 0.3)
         .attr('cx', src.x).attr('cy', src.y)
@@ -432,10 +452,8 @@ function renderStats(stats) {
     container.innerHTML = html;
 }
 
-/* ── Top Bar Counters ─────────────────────────────────────────────── */
-
 function updateCounters(stats) {
-    document.getElementById('event-counter').textContent = `${(stats.total_events || 0)} events`;
+    document.getElementById('event-counter').textContent = `${stats.total_events || 0} events`;
     document.getElementById('token-counter').textContent = `${(stats.total_tokens || 0).toLocaleString()} tokens`;
     document.getElementById('cost-counter').textContent = `$${(stats.total_cost_usd || 0).toFixed(2)}`;
 }
@@ -449,8 +467,9 @@ async function fetchJSON(url) {
 
 async function loadGraph() {
     try {
-        const data = await fetchJSON('/api/graph');
-        const fp = JSON.stringify(data.nodes.map(n => n.id).sort()) + JSON.stringify(data.edges.map(e => e.source + e.target).sort());
+        const data = await fetchJSON('/api/graph' + filterParams());
+        const fp = JSON.stringify(data.nodes.map(n => n.id).sort()) +
+                   JSON.stringify(data.edges.map(e => e.source + e.target).sort());
         if (fp !== _fingerprint) {
             _fingerprint = fp;
             _graphData = data;
@@ -463,12 +482,10 @@ async function loadGraph() {
 
 async function loadTimeline() {
     try {
-        const resp = await fetchJSON('/api/timeline');
+        const resp = await fetchJSON('/api/timeline' + filterParams());
         const timeline = resp.timeline || [];
         _timelineData = timeline.sort((a, b) => new Date(a.start_time) - new Date(b.start_time));
-        if (!_timelinePlaying) {
-            renderTimeline(_timelineData);
-        }
+        if (!_timelinePlaying) renderTimeline(_timelineData);
     } catch (e) {
         console.warn('Timeline load failed:', e);
     }
@@ -476,11 +493,45 @@ async function loadTimeline() {
 
 async function loadStats() {
     try {
-        const stats = await fetchJSON('/api/stats');
+        const stats = await fetchJSON('/api/stats' + filterParams());
         renderStats(stats);
         updateCounters(stats);
     } catch (e) {
         console.warn('Stats load failed:', e);
+    }
+}
+
+async function loadProjects() {
+    try {
+        const resp = await fetchJSON('/api/projects');
+        const projects = resp.projects || [];
+        const sel = document.getElementById('filter-project');
+        const current = sel.value;
+        sel.innerHTML = '<option value="">All Projects</option>' +
+            projects.map(p =>
+                `<option value="${p.name}" ${p.name === current ? 'selected' : ''}>${p.name} (${p.events})</option>`
+            ).join('');
+    } catch (e) {
+        console.warn('Projects load failed:', e);
+    }
+}
+
+async function loadSessions() {
+    try {
+        const params = _filterProject ? `?project=${encodeURIComponent(_filterProject)}` : '';
+        const resp = await fetchJSON('/api/sessions' + params);
+        const sessions = resp.sessions || [];
+        const sel = document.getElementById('filter-session');
+        const current = sel.value;
+        sel.innerHTML = '<option value="">All Sessions</option>' +
+            sessions.map(s => {
+                const label = s.last_prompt
+                    ? s.last_prompt.slice(0, 40) + (s.last_prompt.length > 40 ? '...' : '')
+                    : s.session_id.slice(0, 12) + '...';
+                return `<option value="${s.session_id}" ${s.session_id === current ? 'selected' : ''}>${label} (${s.events})</option>`;
+            }).join('');
+    } catch (e) {
+        console.warn('Sessions load failed:', e);
     }
 }
 
@@ -489,15 +540,22 @@ async function loadAll() {
 }
 
 async function clearData() {
-    await fetch('/api/clear', { method: 'POST' });
+    const params = _filterProject ? `?project=${encodeURIComponent(_filterProject)}` : '';
+    await fetch('/api/clear' + params, { method: 'POST' });
     _fingerprint = '';
     _timelineData = [];
     _timelineIndex = 0;
     timelinePause();
-    await loadAll();
+    await Promise.all([loadProjects(), loadSessions(), loadAll()]);
 }
 
 /* ── Init ─────────────────────────────────────────────────────────── */
 
-loadAll();
+async function init() {
+    await Promise.all([loadProjects(), loadSessions()]);
+    await loadAll();
+}
+
+init();
 setInterval(loadAll, POLL_INTERVAL);
+setInterval(() => { loadProjects(); loadSessions(); }, 10000);  // refresh dropdowns every 10s

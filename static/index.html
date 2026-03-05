@@ -12,15 +12,28 @@
     <header id="topbar">
         <div class="topbar-left">
             <span class="logo">AI Observer</span>
-            <span class="version">v1.0</span>
         </div>
-        <div class="topbar-center">
+        <div class="topbar-filters">
+            <div class="filter-group">
+                <label>Project</label>
+                <select id="filter-project" onchange="onProjectChange()">
+                    <option value="">All Projects</option>
+                </select>
+            </div>
+            <div class="filter-group">
+                <label>Session</label>
+                <select id="filter-session" onchange="onSessionChange()">
+                    <option value="">All Sessions</option>
+                </select>
+            </div>
+        </div>
+        <div class="topbar-stats">
             <span id="event-counter" class="stat-pill">0 events</span>
             <span id="token-counter" class="stat-pill">0 tokens</span>
             <span id="cost-counter" class="stat-pill">$0.00</span>
         </div>
         <div class="topbar-right">
-            <button id="btn-clear" onclick="clearData()" title="Clear all data">Clear</button>
+            <button id="btn-clear" onclick="clearData()" title="Clear current view">Clear</button>
             <span id="connection-status" class="status-dot connected" title="Polling active"></span>
         </div>
     </header>
@@ -30,7 +43,6 @@
         <!-- Graph Panel -->
         <div id="graph-panel">
             <svg id="graph-svg"></svg>
-            <!-- Legend -->
             <div id="legend"></div>
         </div>
 

@@ -3,23 +3,23 @@ AI Observer — Standalone AI Observability Dashboard.
 
 Visualizes external AI system activity (Claude Code, Codex, Gemini, etc.)
 on a D3 force-directed graph with timeline replay and particle animations.
+Supports per-project and per-session filtering.
 
 Run: uvicorn main:app --port 8077
 """
 
 from __future__ import annotations
 
+import os
 from collections import defaultdict
 from pathlib import Path
-from typing import Any
-
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
 from flow_tracker import FlowTracker
 
-app = FastAPI(title="AI Observer", version="1.0.0")
+app = FastAPI(title="AI Observer", version="1.1.0")
 tracker = FlowTracker()
 
 STATIC_DIR = Path(__file__).parent / "static"
@@ -35,6 +35,13 @@ async def index():
     return HTMLResponse("<h1>AI Observer</h1><p>static/index.html not found</p>")
 
 
+def _project_from_cwd(cwd: str) -> str:
+    """Extract project name from a working directory path (last folder)."""
+    if not cwd:
+        return ""
+    return os.path.basename(cwd.rstrip("/"))
+
+
 # ── Ingest endpoint ──────────────────────────────────────────────────
 
 @app.post("/api/hooks/ingest")
@@ -47,6 +54,8 @@ async def ingest_hook(request: Request):
     agent_id = body.get("agent_id", "main")
     agent_name = body.get("agent_name", source_system.replace("-", " ").title())
     parent_id = body.get("parent_agent_id")
+    project = body.get("project", _project_from_cwd(body.get("cwd", "")))
+    session_id = body.get("session_id", "")
 
     def ext_node(aid: str, aname: str | None = None) -> str:
         label = aname or aid
@@ -106,9 +115,11 @@ async def ingest_hook(request: Request):
         cost_usd=body.get("cost_usd", 0.0),
         model=body.get("model", ""),
         provider=source_system,
+        project=project,
+        session_id=session_id,
     )
 
-    return {"status": "recorded", "source": src, "target": tgt, "type": conv_type}
+    return {"status": "recorded", "source": src, "target": tgt, "type": conv_type, "project": project}
 
 
 # ── Claude Code native hook endpoint ─────────────────────────────────
@@ -119,7 +130,7 @@ async def claude_code_hook(request: Request):
     Accepts Claude Code's native hook event format (HTTP hook type).
 
     Claude Code HTTP hooks POST the event data directly as JSON with fields
-    like hook_event_name, tool_name, agent_id, agent_type, session_id, etc.
+    like hook_event_name, tool_name, agent_id, agent_type, session_id, cwd, etc.
     This endpoint translates that into our flow tracker format.
     """
     body = await request.json()
@@ -129,6 +140,8 @@ async def claude_code_hook(request: Request):
     tool_name = body.get("tool_name", "")
     agent_id = body.get("agent_id", "")
     agent_type = body.get("agent_type", "")
+    cwd = body.get("cwd", "")
+    project = _project_from_cwd(cwd)
 
     def cc_node(aid: str = "main", atype: str = "") -> str:
         label = atype or aid or "Claude Code"
@@ -139,24 +152,48 @@ async def claude_code_hook(request: Request):
 
     if event_name == "SessionStart":
         src, tgt = "\U0001f464 User", cc_node()
-        conv_type, summary = "user_request", "Claude Code session started"
+        conv_type = "user_request"
+        summary = f"Session started in {project}" if project else "Claude Code session started"
 
     elif event_name == "UserPromptSubmit":
-        prompt_preview = (body.get("prompt", "") or "")[:120]
+        prompt_preview = (body.get("prompt", "") or "")[:200]
         src, tgt = "\U0001f464 User", cc_node()
         conv_type = "user_request"
         summary = f"Prompt: {prompt_preview}" if prompt_preview else "User prompt"
 
     elif event_name == "PostToolUse":
-        src, tgt = cc_node(agent_id, agent_type) if agent_id else cc_node(), f"\U0001f527 {tool_name or 'Unknown'}"
+        src = cc_node(agent_id, agent_type) if agent_id else cc_node()
+        tgt = f"\U0001f527 {tool_name or 'Unknown'}"
         conv_type = "tool_call"
-        summary = f"Tool: {tool_name}"
+        # Include a preview of what the tool did
+        tool_input = body.get("tool_input", {})
+        if isinstance(tool_input, dict):
+            if tool_name == "Bash":
+                cmd = tool_input.get("command", "")[:80]
+                summary = f"Bash: {cmd}" if cmd else "Tool: Bash"
+            elif tool_name == "Read":
+                fp = tool_input.get("file_path", "")
+                summary = f"Read: {os.path.basename(fp)}" if fp else "Tool: Read"
+            elif tool_name in ("Write", "Edit"):
+                fp = tool_input.get("file_path", "")
+                summary = f"{tool_name}: {os.path.basename(fp)}" if fp else f"Tool: {tool_name}"
+            elif tool_name in ("Glob", "Grep"):
+                pattern = tool_input.get("pattern", "")[:60]
+                summary = f"{tool_name}: {pattern}" if pattern else f"Tool: {tool_name}"
+            elif tool_name == "Task":
+                desc = tool_input.get("description", "")[:80]
+                summary = f"Task: {desc}" if desc else "Tool: Task"
+            else:
+                summary = f"Tool: {tool_name}"
+        else:
+            summary = f"Tool: {tool_name}"
 
     elif event_name == "PostToolUseFailure":
-        src, tgt = cc_node(agent_id, agent_type) if agent_id else cc_node(), f"\U0001f527 {tool_name or 'Unknown'}"
+        src = cc_node(agent_id, agent_type) if agent_id else cc_node()
+        tgt = f"\U0001f527 {tool_name or 'Unknown'}"
         conv_type = "error"
         error_msg = (body.get("error", "") or "")[:100]
-        summary = f"Tool failed: {tool_name} — {error_msg}" if error_msg else f"Tool failed: {tool_name}"
+        summary = f"Failed: {tool_name} \u2014 {error_msg}" if error_msg else f"Failed: {tool_name}"
 
     elif event_name == "SubagentStart":
         parent = cc_node()
@@ -175,7 +212,7 @@ async def claude_code_hook(request: Request):
     elif event_name == "Stop":
         src, tgt = cc_node(), "\U0001f464 User"
         conv_type = "session_end"
-        summary = "Claude Code response complete"
+        summary = "Response complete"
 
     elif event_name == "SessionEnd":
         src, tgt = cc_node(), "\U0001f464 User"
@@ -192,12 +229,14 @@ async def claude_code_hook(request: Request):
             conversation_type=conv_type,
             summary=summary,
             provider="claude-code",
+            project=project,
+            session_id=session_id,
         )
 
-    return {"status": "recorded", "event": event_name, "source": src, "target": tgt}
+    return {"status": "recorded", "event": event_name, "source": src, "target": tgt, "project": project}
 
 
-# ── Read endpoints ───────────────────────────────────────────────────
+# ── Read endpoints (all accept ?project= and ?session= filters) ──────
 
 def _get_entity_type(node_id: str) -> str:
     if node_id.startswith("EXT:"):
@@ -212,13 +251,12 @@ def _get_entity_type(node_id: str) -> str:
 
 
 @app.get("/api/graph")
-async def get_graph():
+async def get_graph(project: str = "", session: str = ""):
     """Node + edge data for D3 force graph."""
-    data = tracker.get_interaction_matrix()
+    data = tracker.get_interaction_matrix(project=project, session_id=session)
     nodes_raw = data["nodes"]
     matrix = data["matrix"]
 
-    # Build node list
     nodes = []
     for node_id, counts in nodes_raw.items():
         nodes.append({
@@ -228,9 +266,8 @@ async def get_graph():
             "messages_received": counts["received"],
         })
 
-    # Build edge list with flow type enrichment
     edges = []
-    recent = tracker.recent_flows(limit=200)
+    recent = tracker.recent_flows(limit=200, project=project, session_id=session)
     flow_index: dict[str, list[dict]] = defaultdict(list)
     for f in recent:
         key = f"{f.source}->{f.target}"
@@ -258,27 +295,40 @@ async def get_graph():
 
 
 @app.get("/api/timeline")
-async def get_timeline():
+async def get_timeline(project: str = "", session: str = ""):
     """Chronological flow list for timeline replay."""
-    timeline = tracker.get_timeline()
+    timeline = tracker.get_timeline(project=project, session_id=session)
     return {"timeline": [f.to_dict() for f in timeline]}
 
 
 @app.get("/api/stats")
-async def get_stats():
+async def get_stats(project: str = "", session: str = ""):
     """Aggregate statistics."""
-    return tracker.get_stats()
+    return tracker.get_stats(project=project, session_id=session)
 
 
 @app.get("/api/flows")
-async def get_flows():
+async def get_flows(project: str = "", session: str = ""):
     """All flow records (raw)."""
     with tracker._lock:
-        return {"flows": [f.to_dict() for f in tracker._flows.values()]}
+        flows = tracker._filter(project, session)
+        return {"flows": [f.to_dict() for f in flows]}
+
+
+@app.get("/api/projects")
+async def get_projects():
+    """List all known projects with event counts."""
+    return {"projects": tracker.get_projects()}
+
+
+@app.get("/api/sessions")
+async def get_sessions(project: str = ""):
+    """List sessions, optionally filtered by project."""
+    return {"sessions": tracker.get_sessions(project=project)}
 
 
 @app.post("/api/clear")
-async def clear_flows():
-    """Clear all flow data."""
-    tracker.clear()
-    return {"status": "cleared"}
+async def clear_flows(project: str = ""):
+    """Clear flow data. If project given, only clear that project."""
+    tracker.clear(project=project)
+    return {"status": "cleared", "project": project or "all"}
